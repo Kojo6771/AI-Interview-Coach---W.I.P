@@ -1,5 +1,11 @@
 from fastapi import FastAPI
 from app.routes import auth
+from app.database import Base, engine
+from app.models import User
+
+
+Base.metadata.create_all(bind=engine)  # Create database tables based on models
+
 
 # Create the FastAPI application instance.
 # This sets API metadata used by automatic docs and client generation.
