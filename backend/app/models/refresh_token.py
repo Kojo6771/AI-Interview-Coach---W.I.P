@@ -1,3 +1,5 @@
+# RefreshToken stores credential refresh tokens for API session rotation.
+# The token hash is kept server-side so invalidated or expired tokens can be revoked safely.
 from sqlalchemy import (
     Column,
     Integer,

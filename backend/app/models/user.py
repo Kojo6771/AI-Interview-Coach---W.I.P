@@ -1,3 +1,5 @@
+# User is the main authentication and account record for the application.
+# It stores the login identity, password hash, access role, and lifecycle flags.
 from sqlalchemy import (Column, Integer, String, Boolean, DateTime)
 
 

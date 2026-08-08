@@ -1,3 +1,5 @@
+# CVDocument stores an uploaded resume or curriculum vitae for a user.
+# The extracted_text field keeps parsed CV content used for interview generation.
 from sqlalchemy import (
     Column,
     Integer,

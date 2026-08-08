@@ -1,3 +1,5 @@
+# UserProfile stores a user's public-facing profile details.
+# It is linked one-to-one to the base User record.
 from sqlalchemy import (
     Column,
     Integer,
