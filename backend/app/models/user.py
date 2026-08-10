@@ -16,6 +16,13 @@ class User(Base):
         index=True
     )
 
+    username = Column(
+        String(100),
+        unique=True,
+        nullable=False,
+        index=True
+    )
+
     email = Column(
         String(255),
         unique=True,
