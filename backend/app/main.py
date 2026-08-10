@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.routes import auth
+from app.routes import auth, users
 from app.database import Base, engine
 from app.models import User
 from app.models import UserProfile
@@ -11,6 +11,7 @@ from app.models import CVDocument
 from app.models import TargetRole
 from app.models import Progress
 from app.models import RefreshToken
+
 
 
 Base.metadata.create_all(bind=engine)  # Create database tables based on models
@@ -29,6 +30,7 @@ app = FastAPI(
 
 # Register authentication and other related routes from the auth router.
 app.include_router(auth.router)
+app.include_router(users.router)  # Include the users router for user-related endpoints
 
 # Root endpoint for a simple welcome message and health check.
 @app.get("/")
