@@ -6,6 +6,9 @@ from app.models.user import User
 from app.schemas.user import UserRegistration, UserLogin
 from app.auth.hashing import hash_password, verify_password
 from app.auth.jwt_handler import create_access_token
+from fastapi.security import OAuth2PasswordRequestForm
+
+
 
 # Define the authentication router with a prefix and tags
 router = APIRouter(
@@ -51,29 +54,29 @@ def register(
 # Define the login endpoint for user authentication
 @router.post("/login")
 def login(
-    user: UserLogin,
+    form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
     db_user = (
         db.query(User)
-        .filter(User.email == user.email)
+        .filter(User.email == form_data.username)
         .first()
     )
 
     if not db_user or not verify_password(
-        user.password,
+        form_data.password,
         db_user.hashed_password
     ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password"
+            detail="Invalid email or password",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
     access_token = create_access_token(
         {"sub": str(db_user.id)}
     )
 
-# Return the access token and token type in the response
     return {
         "access_token": access_token,
         "token_type": "bearer"
