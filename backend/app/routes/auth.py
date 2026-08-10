@@ -1,16 +1,76 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
 
-# Router dedicated to authentication-related endpoints.
-# The prefix '/auth' is applied to all routes in this module.
+from app.database import get_db
+from app.models.user import User
+from app.schemas.user import UserRegistration, UserLogin
+from app.auth.hashing import hash_password, verify_password
+from app.auth.jwt_handler import create_access_token
+
+
 router = APIRouter(
     prefix="/auth",
-    tags=["Authentication"],
+    tags=["Authentication"]
 )
 
-# Health-check endpoint for the auth router.
-# Use this to confirm auth routes are mounted correctly.
-@router.get("/")
-def auth_test():
+
+@router.post("/register")
+def register(
+    user: UserRegistration,
+    db: Session = Depends(get_db)
+):
+    existing_user = (
+        db.query(User)
+        .filter(User.email == user.email)
+        .first()
+    )
+
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+
+    new_user = User(
+        username=user.username,
+        email=user.email,
+        password_hash=hash_password(user.password)
+    )
+
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
     return {
-        "message": "Authentication route is working!"
+        "message": "User registered successfully"
+    }
+
+
+@router.post("/login")
+def login(
+    user: UserLogin,
+    db: Session = Depends(get_db)
+):
+    db_user = (
+        db.query(User)
+        .filter(User.email == user.email)
+        .first()
+    )
+
+    if not db_user or not verify_password(
+        user.password,
+        db_user.password_hash
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password"
+        )
+
+    access_token = create_access_token(
+        {"sub": str(db_user.id)}
+    )
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer"
     }
