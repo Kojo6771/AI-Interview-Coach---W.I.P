@@ -30,32 +30,30 @@ class User(Base):
         index=True
     )
 
-    # The live PostgreSQL schema stores the auth digest under hashed_password.
-    hashed_password = Column(
-        "hashed_password",
+    password_hash = Column(
         String(255),
         nullable=False
     )
 
-    # role = Column(
-    #     String(50),
-    #     default="user",
-    #     nullable=False
-    # )
+    role = Column(
+        String(50),
+        default="user",
+        nullable=False
+    )
 
-    # is_active = Column(
-    #     Boolean,
-    #     default=True,
-    #     nullable=False
-    # )
+    is_active = Column(
+        Boolean,
+        default=True,
+        nullable=False
+    )
 
-    # created_at = Column(
-    #     DateTime(timezone=True),
-    #     server_default=func.now()
-    # )
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now()
+    )
 
-    # updated_at = Column(
-    #     DateTime(timezone=True),
-    #     server_default=func.now(),
-    #     onupdate=func.now()
-    # )
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now()
+    )
