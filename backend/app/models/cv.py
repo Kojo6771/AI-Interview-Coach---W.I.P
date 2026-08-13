@@ -1,5 +1,7 @@
 # CVDocument stores an uploaded resume or curriculum vitae for a user.
 # The extracted_text field keeps parsed CV content used for interview generation.
+from datetime import datetime, timezone
+
 from sqlalchemy import (
     Column,
     Integer,
@@ -8,7 +10,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey
 )
-from sqlalchemy.sql import func
+
 
 from app.database import Base
 
@@ -19,13 +21,15 @@ class CVDocument(Base):
 
     id = Column(
         Integer,
-        primary_key=True
+        primary_key=True,
+        index=True
     )
 
     user_id = Column(
         Integer,
         ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False
+        nullable=False,
+        index=True
     )
 
     filename = Column(
@@ -39,10 +43,12 @@ class CVDocument(Base):
     )
 
     extracted_text = Column(
-        Text
+        Text,
+        nullable=False
     )
 
     uploaded_at = Column(
         DateTime(timezone=True),
-        server_default=func.now()
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False
     )
