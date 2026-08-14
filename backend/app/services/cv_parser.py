@@ -1,53 +1,55 @@
-#cv parser service
 from io import BytesIO
-
 from docx import Document
 from pypdf import PdfReader
 
-# extract text from PDF file
+#extract text from PDF
 def extract_pdf_text(file_bytes: bytes) -> str:
-    pdf_file = BytesIO(file_bytes)
-
-    reader = PdfReader(pdf_file)
+    reader = PdfReader(BytesIO(file_bytes))
 
     text_parts = []
 
     for page in reader.pages:
-        page_text = page.extract_text()
+        text = page.extract_text()
 
-        if page_text:
-            text_parts.append(page_text)
+        if text:
+            text_parts.append(text)
 
     return "\n".join(text_parts).strip()
 
-
-# extract text from DOCX file
+#extract text from DOCX
 def extract_docx_text(file_bytes: bytes) -> str:
-    docx_file = BytesIO(file_bytes)
-
-    document = Document(docx_file)
+    document = Document(BytesIO(file_bytes))
 
     text_parts = []
 
-    # Extract normal paragraphs
     for paragraph in document.paragraphs:
-        if paragraph.text.strip():
-            text_parts.append(paragraph.text)
+        text = paragraph.text.strip()
 
-    # Extract text from tables as well
+        if text:
+            text_parts.append(text)
+
     for table in document.tables:
         for row in table.rows:
             for cell in row.cells:
-                if cell.text.strip():
-                    text_parts.append(cell.text)
+                text = cell.text.strip()
+
+                if text:
+                    text_parts.append(text)
 
     return "\n".join(text_parts).strip()
 
-# Extract text from CV file based on its type (PDF or DOCX)
-def extract_cv_text(file_bytes: bytes, file_type: str) -> str:
-    if file_type == "pdf":
+#extract text from CV based on file extension
+def extract_cv_text(
+    file_bytes: bytes,
+    file_extension: str
+) -> str:
+
+    if file_extension == ".pdf":
         return extract_pdf_text(file_bytes)
-    elif file_type == "docx":
+
+    if file_extension == ".docx":
         return extract_docx_text(file_bytes)
-    else:
-        raise ValueError("Unsupported file type. Only 'pdf' and 'docx' are supported.")
+
+    raise ValueError(
+        f"Unsupported file type: {file_extension}"
+    )

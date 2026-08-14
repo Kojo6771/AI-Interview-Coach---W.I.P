@@ -7,7 +7,7 @@ class CVResponse(BaseModel):
     id: int
     user_id: int
     filename: str
-    file_path: str
+    file_type: str
     uploaded_at: datetime
 
     model_config = ConfigDict(

@@ -11,12 +11,10 @@ from sqlalchemy import (
     ForeignKey
 )
 
-
 from app.database import Base
 
-
+# CVDocument is a SQLAlchemy model representing a CV document in the database.
 class CVDocument(Base):
-
     __tablename__ = "cv_documents"
 
     id = Column(
@@ -37,9 +35,14 @@ class CVDocument(Base):
         nullable=False
     )
 
+    file_type = Column(
+        String(10),
+        nullable=False
+    )
+
     file_path = Column(
         String(500),
-        nullable=False
+        nullable=True
     )
 
     extracted_text = Column(
