@@ -14,11 +14,7 @@ from app.database import get_db
 from app.models.cv import CVDocument
 from app.services.cv_parser import extract_cv_text
 from app.schemas.cv import  CVResponse
-
-# IMPORTANT:
-# Replace this import with the SAME get_current_user import
-# used by your working GET /users/me endpoint.
-from app.auth.dependencies import get_current_user
+from app.routes.dependencies import get_current_user
 from app.models.user import User
 
 #api router for CV-related endpoints
