@@ -136,3 +136,22 @@ async def upload_cv(
         )
 
     return cv
+
+#CV get endpoint to retrieve all CVs for the current user
+@router.get(
+    "",
+    response_model=list[CVResponse],
+    status_code=status.HTTP_200_OK
+)
+def get_user_cvs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    cvs = (
+        db.query(CVDocument)
+        .filter(CVDocument.user_id == current_user.id)
+        .order_by(CVDocument.uploaded_at.desc())
+        .all()
+    )
+
+    return cvs
