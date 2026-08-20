@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.cv import CVDocument
 from app.models.user import User
-from app.schemas.cv import CVResponse
+from app.schemas.cv import CVResponse, CVDetailResponse
 from app.services.cv_parser import extract_cv_text
 
 # Use the same import you use for GET /users/me
@@ -155,3 +155,31 @@ def get_user_cvs(
     )
 
     return cvs
+
+
+@router.get(
+    "/{cv_id}",
+    response_model=CVDetailResponse,
+    status_code=status.HTTP_200_OK
+)
+def get_cv(
+    cv_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    cv = (
+        db.query(CVDocument)
+        .filter(
+            CVDocument.id == cv_id,
+            CVDocument.user_id == current_user.id
+        )
+        .first()
+    )
+
+    if not cv:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="CV not found"
+        )
+
+    return cv

@@ -13,3 +13,6 @@ class CVResponse(BaseModel):
     model_config = ConfigDict(
         from_attributes=True
     )
+
+class CVDetailResponse(CVResponse):
+    extracted_text:str
