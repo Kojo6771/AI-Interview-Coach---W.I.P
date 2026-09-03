@@ -188,12 +188,12 @@ def search_cvs_by_ids(
     return cvs
 
 
-@router.get(
+#CV delete endpoint - only the owner of the CV can delete it
+@router.delete(
     "/{cv_id}",
-    response_model=CVDetailResponse,
-    status_code=status.HTTP_200_OK
+    status_code=status.HTTP_204_NO_CONTENT
 )
-def get_cv(
+def delete_cv(
     cv_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -207,10 +207,28 @@ def get_cv(
         .first()
     )
 
-    if not cv:
+    # 404 whether the CV doesn't exist or belongs to another user,
+    # so we don't leak the existence of other users' CVs
+    if cv is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=404,
             detail="CV not found"
         )
 
-    return cv
+    try:
+        db.delete(cv)
+        db.commit()
+
+    except Exception as e:
+        db.rollback()
+
+        print("DATABASE ERROR:", repr(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete CV"
+        )
+
+    return None
+
+
