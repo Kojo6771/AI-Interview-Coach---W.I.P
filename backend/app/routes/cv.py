@@ -5,6 +5,7 @@ from fastapi import (
     Depends,
     File,
     HTTPException,
+    Query,
     UploadFile,
     status
 )
@@ -150,6 +151,36 @@ def get_user_cvs(
     cvs = (
         db.query(CVDocument)
         .filter(CVDocument.user_id == current_user.id)
+        .order_by(CVDocument.uploaded_at.desc())
+        .all()
+    )
+
+    return cvs
+
+
+#CV search endpoint to retrieve multiple CVs by their ids
+@router.get(
+    "/search",
+    response_model=list[CVResponse],
+    status_code=status.HTTP_200_OK
+)
+def search_cvs_by_ids(
+    ids: list[int] = Query(..., description="CV ids to search for"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if not ids:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one CV id must be provided"
+        )
+
+    cvs = (
+        db.query(CVDocument)
+        .filter(
+            CVDocument.id.in_(ids),
+            CVDocument.user_id == current_user.id
+        )
         .order_by(CVDocument.uploaded_at.desc())
         .all()
     )
