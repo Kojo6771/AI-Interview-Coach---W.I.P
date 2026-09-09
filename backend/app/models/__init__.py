@@ -3,6 +3,7 @@ from .user_profile import UserProfile
 from .interview import Interview    
 from .interview_session import InterviewSession
 from .question import Question
+from .interview_question import InterviewQuestion
 from .answer import Answer
 from .feedback import Feedback
 from .cv import CVDocument 

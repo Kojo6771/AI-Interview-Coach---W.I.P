@@ -10,12 +10,15 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.cv import CVDocument
 from app.models.interview_session import InterviewSession
+from app.models.interview_question import InterviewQuestion
 from app.models.user import User
 from app.schemas.interview import (
     InterviewCreate,
     InterviewResponse,
     InterviewDetailResponse
 )
+from app.schemas.question import QuestionResponse
+from app.services.question_service import generate_sample_questions
 
 from app.routes.dependencies import get_current_user
 
@@ -24,6 +27,32 @@ router = APIRouter(
     prefix="/interviews",
     tags=["Interviews"]
 )
+
+
+#shared ownership check reused by the interview and question endpoints below
+def _get_owned_interview(
+    interview_id: int,
+    db: Session,
+    current_user: User
+) -> InterviewSession:
+    interview = (
+        db.query(InterviewSession)
+        .filter(
+            InterviewSession.id == interview_id,
+            InterviewSession.user_id == current_user.id
+        )
+        .first()
+    )
+
+    # 404 whether the interview doesn't exist or belongs to another user,
+    # so we don't leak the existence of other users' interviews
+    if interview is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Interview not found"
+        )
+
+    return interview
 
 
 @router.post(
@@ -110,21 +139,117 @@ def get_interview(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    interview = (
-        db.query(InterviewSession)
+    return _get_owned_interview(interview_id, db, current_user)
+
+
+#temporary sample question generator - will be replaced by real AI generation later
+@router.post(
+    "/{interview_id}/questions/generate",
+    response_model=list[QuestionResponse],
+    status_code=status.HTTP_201_CREATED
+)
+def generate_interview_questions(
+    interview_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    interview = _get_owned_interview(interview_id, db, current_user)
+
+    existing_question = (
+        db.query(InterviewQuestion)
+        .filter(InterviewQuestion.interview_id == interview.id)
+        .first()
+    )
+
+    if existing_question is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Questions have already been generated for this interview."
+        )
+
+    sample_questions = generate_sample_questions(interview)
+
+    new_questions = [
+        InterviewQuestion(
+            interview_id=interview.id,
+            question_text=sample["question_text"],
+            question_type=sample["question_type"],
+            difficulty=interview.difficulty,
+            order_number=index + 1
+        )
+        for index, sample in enumerate(sample_questions)
+    ]
+
+    db.add_all(new_questions)
+
+    try:
+        db.commit()
+
+        for question in new_questions:
+            db.refresh(question)
+
+    except Exception as e:
+        db.rollback()
+
+        print("DATABASE ERROR:", repr(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to generate questions"
+        )
+
+    return new_questions
+
+
+#question get endpoint to retrieve all questions for an interview, ordered for presentation
+@router.get(
+    "/{interview_id}/questions",
+    response_model=list[QuestionResponse],
+    status_code=status.HTTP_200_OK
+)
+def get_interview_questions(
+    interview_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    interview = _get_owned_interview(interview_id, db, current_user)
+
+    questions = (
+        db.query(InterviewQuestion)
+        .filter(InterviewQuestion.interview_id == interview.id)
+        .order_by(InterviewQuestion.order_number.asc())
+        .all()
+    )
+
+    return questions
+
+
+@router.get(
+    "/{interview_id}/questions/{question_id}",
+    response_model=QuestionResponse,
+    status_code=status.HTTP_200_OK
+)
+def get_interview_question(
+    interview_id: int,
+    question_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    interview = _get_owned_interview(interview_id, db, current_user)
+
+    question = (
+        db.query(InterviewQuestion)
         .filter(
-            InterviewSession.id == interview_id,
-            InterviewSession.user_id == current_user.id
+            InterviewQuestion.id == question_id,
+            InterviewQuestion.interview_id == interview.id
         )
         .first()
     )
 
-    # 404 whether the interview doesn't exist or belongs to another user,
-    # so we don't leak the existence of other users' interviews
-    if interview is None:
+    if question is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Interview not found"
+            detail="Question not found"
         )
 
-    return interview
+    return question

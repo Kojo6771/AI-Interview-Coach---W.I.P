@@ -6,6 +6,7 @@ from app.models import UserProfile
 from app.models import Interview
 from app.models import InterviewSession
 from app.models import Question
+from app.models import InterviewQuestion
 from app.models import Answer
 from app.models import Feedback
 from app.models import CVDocument
