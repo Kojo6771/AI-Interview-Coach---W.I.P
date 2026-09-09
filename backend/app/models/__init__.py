@@ -1,6 +1,7 @@
 from .user import User
 from .user_profile import UserProfile
 from .interview import Interview    
+from .interview_session import InterviewSession
 from .question import Question
 from .answer import Answer
 from .feedback import Feedback
