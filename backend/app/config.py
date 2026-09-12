@@ -10,3 +10,6 @@ Database_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
 Secret_Key = os.getenv("SECRET_KEY")
 Algorithm = os.getenv("ALGORITHM")
 Access_Token_Expire_Minutes = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES"))
+
+# Used by app/services/ai_service.py to call the OpenAI API
+OpenAI_Api_Key = os.getenv("OPENAI_API_KEY")

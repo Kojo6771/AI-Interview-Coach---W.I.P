@@ -5,6 +5,7 @@ from fastapi import (
     status
 )
 
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -17,8 +18,12 @@ from app.schemas.interview import (
     InterviewResponse,
     InterviewDetailResponse
 )
-from app.schemas.question import QuestionResponse
-from app.services.question_service import generate_sample_questions
+from app.schemas.question import QuestionCreate, QuestionResponse
+from app.services.ai_service import (
+    AIResponseError,
+    AIServiceError,
+    generate_interview_questions as ai_generate_questions
+)
 
 from app.routes.dependencies import get_current_user
 
@@ -142,7 +147,7 @@ def get_interview(
     return _get_owned_interview(interview_id, db, current_user)
 
 
-#temporary sample question generator - will be replaced by real AI generation later
+#uses the CV linked to the interview to generate AI-personalised questions
 @router.post(
     "/{interview_id}/questions/generate",
     response_model=list[QuestionResponse],
@@ -167,18 +172,77 @@ def generate_interview_questions(
             detail="Questions have already been generated for this interview."
         )
 
-    sample_questions = generate_sample_questions(interview)
+    cv = (
+        db.query(CVDocument)
+        .filter(CVDocument.id == interview.cv_id)
+        .first()
+    )
 
-    new_questions = [
-        InterviewQuestion(
-            interview_id=interview.id,
-            question_text=sample["question_text"],
-            question_type=sample["question_type"],
-            difficulty=interview.difficulty,
-            order_number=index + 1
+    if cv is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="CV not found"
         )
-        for index, sample in enumerate(sample_questions)
-    ]
+
+    if not cv.extracted_text or not cv.extracted_text.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="CV text is missing for this CV. Please re-upload it."
+        )
+
+    try:
+        generated_questions = ai_generate_questions(
+            cv_text=cv.extracted_text,
+            target_role=interview.target_role,
+            job_description=interview.job_description,
+            interview_type=interview.interview_type,
+            difficulty=interview.difficulty
+        )
+
+    except AIServiceError as e:
+        print("AI SERVICE ERROR:", repr(e))
+
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The AI service is currently unavailable. Please try again later."
+        )
+
+    except AIResponseError as e:
+        print("AI RESPONSE ERROR:", repr(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail="Received an invalid response while generating questions."
+        )
+
+    new_questions = []
+
+    for index, generated in enumerate(generated_questions):
+        try:
+            validated = QuestionCreate(
+                question_text=generated["question_text"],
+                question_type=generated["question_type"],
+                difficulty=interview.difficulty,
+                order_number=index + 1
+            )
+
+        except ValidationError as e:
+            print("AI RESPONSE ERROR:", repr(e))
+
+            raise HTTPException(
+                status_code=500,
+                detail="Received an invalid response while generating questions."
+            )
+
+        new_questions.append(
+            InterviewQuestion(
+                interview_id=interview.id,
+                question_text=validated.question_text,
+                question_type=validated.question_type,
+                difficulty=validated.difficulty,
+                order_number=validated.order_number
+            )
+        )
 
     db.add_all(new_questions)
 
