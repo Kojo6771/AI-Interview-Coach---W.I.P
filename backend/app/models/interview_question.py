@@ -9,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey
 )
+from sqlalchemy.orm import relationship
 
 from app.database import Base
 
@@ -53,4 +54,11 @@ class InterviewQuestion(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
         nullable=False
+    )
+
+    answer = relationship(
+        "Answer",
+        back_populates="question",
+        uselist=False,
+        cascade="all, delete-orphan"
     )

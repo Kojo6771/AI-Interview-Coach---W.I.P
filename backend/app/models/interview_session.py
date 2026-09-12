@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey
 )
+from sqlalchemy.orm import relationship
 
 from app.database import Base
 
@@ -72,4 +73,10 @@ class InterviewSession(Base):
     completed_at = Column(
         DateTime(timezone=True),
         nullable=True
+    )
+
+    answers = relationship(
+        "Answer",
+        back_populates="interview",
+        cascade="all, delete-orphan"
     )

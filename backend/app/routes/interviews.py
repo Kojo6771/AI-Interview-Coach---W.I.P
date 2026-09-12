@@ -6,13 +6,21 @@ from fastapi import (
 )
 
 from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.models.answer import Answer
 from app.models.cv import CVDocument
 from app.models.interview_session import InterviewSession
 from app.models.interview_question import InterviewQuestion
 from app.models.user import User
+from app.schemas.answer import (
+    AnswerCreate,
+    AnswerResponse,
+    AnswerUpdate,
+    InterviewAnswerResponse
+)
 from app.schemas.interview import (
     InterviewCreate,
     InterviewResponse,
@@ -58,6 +66,53 @@ def _get_owned_interview(
         )
 
     return interview
+
+
+#shared ownership check reused by the answer endpoints below
+def _get_owned_question(
+    interview: InterviewSession,
+    question_id: int,
+    db: Session
+) -> InterviewQuestion:
+    question = (
+        db.query(InterviewQuestion)
+        .filter(
+            InterviewQuestion.id == question_id,
+            InterviewQuestion.interview_id == interview.id
+        )
+        .first()
+    )
+
+    # 404 whether the question doesn't exist or belongs to a different interview,
+    # so a client can't probe which question ids belong to other interviews
+    if question is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Question not found"
+        )
+
+    return question
+
+
+#not exposed via an endpoint yet - available for future interview-completion logic
+def _get_answer_progress(interview: InterviewSession, db: Session) -> dict:
+    total_questions = (
+        db.query(InterviewQuestion)
+        .filter(InterviewQuestion.interview_id == interview.id)
+        .count()
+    )
+
+    answered_questions = (
+        db.query(Answer)
+        .filter(Answer.interview_id == interview.id)
+        .count()
+    )
+
+    return {
+        "total_questions": total_questions,
+        "answered_questions": answered_questions,
+        "remaining_questions": total_questions - answered_questions
+    }
 
 
 @router.post(
@@ -317,3 +372,182 @@ def get_interview_question(
         )
 
     return question
+
+
+#submit an answer to a question - only one answer allowed per question
+@router.post(
+    "/{interview_id}/questions/{question_id}/answer",
+    response_model=AnswerResponse,
+    status_code=status.HTTP_201_CREATED
+)
+def create_answer(
+    interview_id: int,
+    question_id: int,
+    answer_in: AnswerCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    interview = _get_owned_interview(interview_id, db, current_user)
+    question = _get_owned_question(interview, question_id, db)
+
+    existing_answer = (
+        db.query(Answer)
+        .filter(Answer.question_id == question.id)
+        .first()
+    )
+
+    if existing_answer is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="An answer has already been submitted for this question"
+        )
+
+    answer = Answer(
+        question_id=question.id,
+        interview_id=interview.id,
+        answer_text=answer_in.answer_text
+    )
+
+    db.add(answer)
+
+    try:
+        db.commit()
+        db.refresh(answer)
+
+    # safety net for a race where two requests pass the existing_answer check together
+    except IntegrityError:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="An answer has already been submitted for this question"
+        )
+
+    except Exception as e:
+        db.rollback()
+
+        print("DATABASE ERROR:", repr(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to save answer"
+        )
+
+    return answer
+
+
+#update the existing answer for a question - does not create a new row
+@router.put(
+    "/{interview_id}/questions/{question_id}/answer",
+    response_model=AnswerResponse,
+    status_code=status.HTTP_200_OK
+)
+def update_answer(
+    interview_id: int,
+    question_id: int,
+    answer_in: AnswerUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    interview = _get_owned_interview(interview_id, db, current_user)
+    question = _get_owned_question(interview, question_id, db)
+
+    answer = (
+        db.query(Answer)
+        .filter(Answer.question_id == question.id)
+        .first()
+    )
+
+    if answer is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No answer has been submitted for this question yet"
+        )
+
+    answer.answer_text = answer_in.answer_text
+
+    try:
+        db.commit()
+        db.refresh(answer)
+
+    except Exception as e:
+        db.rollback()
+
+        print("DATABASE ERROR:", repr(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to update answer"
+        )
+
+    return answer
+
+
+#retrieve the saved answer for a single question
+@router.get(
+    "/{interview_id}/questions/{question_id}/answer",
+    response_model=AnswerResponse,
+    status_code=status.HTTP_200_OK
+)
+def get_answer(
+    interview_id: int,
+    question_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    interview = _get_owned_interview(interview_id, db, current_user)
+    question = _get_owned_question(interview, question_id, db)
+
+    answer = (
+        db.query(Answer)
+        .filter(Answer.question_id == question.id)
+        .first()
+    )
+
+    if answer is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Answer not found"
+        )
+
+    return answer
+
+
+#retrieve every answered question for an interview, in question order
+@router.get(
+    "/{interview_id}/answers",
+    response_model=list[InterviewAnswerResponse],
+    status_code=status.HTTP_200_OK
+)
+def get_interview_answers(
+    interview_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    interview = _get_owned_interview(interview_id, db, current_user)
+
+    questions = (
+        db.query(InterviewQuestion)
+        .filter(InterviewQuestion.interview_id == interview.id)
+        .order_by(InterviewQuestion.order_number.asc())
+        .all()
+    )
+
+    answers = []
+
+    for question in questions:
+        if question.answer is None:
+            continue
+
+        answers.append(
+            InterviewAnswerResponse(
+                id=question.answer.id,
+                question_id=question.id,
+                question_order=question.order_number,
+                question_text=question.question_text,
+                answer_text=question.answer.answer_text,
+                created_at=question.answer.created_at
+            )
+        )
+
+    return answers
