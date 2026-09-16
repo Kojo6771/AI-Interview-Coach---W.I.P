@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.answer import Answer
 from app.models.cv import CVDocument
+from app.models.feedback import Feedback
 from app.models.interview_session import InterviewSession
 from app.models.interview_question import InterviewQuestion
 from app.models.user import User
@@ -21,6 +22,7 @@ from app.schemas.answer import (
     AnswerUpdate,
     InterviewAnswerResponse
 )
+from app.schemas.feedback import FeedbackResponse, QuestionAnswerFeedbackResponse
 from app.schemas.interview import (
     InterviewCreate,
     InterviewResponse,
@@ -30,6 +32,7 @@ from app.schemas.question import QuestionCreate, QuestionResponse
 from app.services.ai_service import (
     AIResponseError,
     AIServiceError,
+    evaluate_interview_answer as ai_evaluate_answer,
     generate_interview_questions as ai_generate_questions
 )
 
@@ -92,6 +95,26 @@ def _get_owned_question(
         )
 
     return question
+
+
+#shared ownership check reused by the evaluate/feedback endpoints below
+def _get_owned_answer(
+    question: InterviewQuestion,
+    db: Session
+) -> Answer:
+    answer = (
+        db.query(Answer)
+        .filter(Answer.question_id == question.id)
+        .first()
+    )
+
+    if answer is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No answer has been submitted for this question yet"
+        )
+
+    return answer
 
 
 #not exposed via an endpoint yet - available for future interview-completion logic
@@ -466,6 +489,16 @@ def update_answer(
 
     answer.answer_text = answer_in.answer_text
 
+    # stale feedback no longer matches the edited answer text - delete it in the same transaction
+    existing_feedback = (
+        db.query(Feedback)
+        .filter(Feedback.answer_id == answer.id)
+        .first()
+    )
+
+    if existing_feedback is not None:
+        db.delete(existing_feedback)
+
     try:
         db.commit()
         db.refresh(answer)
@@ -551,3 +584,136 @@ def get_interview_answers(
         )
 
     return answers
+
+
+#requests an AI evaluation of the answer already submitted for this question
+@router.post(
+    "/{interview_id}/questions/{question_id}/evaluate",
+    response_model=FeedbackResponse,
+    status_code=status.HTTP_201_CREATED
+)
+def evaluate_answer(
+    interview_id: int,
+    question_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    interview = _get_owned_interview(interview_id, db, current_user)
+    question = _get_owned_question(interview, question_id, db)
+    answer = _get_owned_answer(question, db)
+
+    existing_feedback = (
+        db.query(Feedback)
+        .filter(Feedback.answer_id == answer.id)
+        .first()
+    )
+
+    if existing_feedback is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This answer has already been evaluated"
+        )
+
+    cv = (
+        db.query(CVDocument)
+        .filter(CVDocument.id == interview.cv_id)
+        .first()
+    )
+
+    try:
+        result = ai_evaluate_answer(
+            question_text=question.question_text,
+            answer_text=answer.answer_text,
+            question_type=question.question_type,
+            target_role=interview.target_role,
+            difficulty=question.difficulty,
+            job_description=interview.job_description,
+            cv_text=cv.extracted_text if cv is not None else None
+        )
+
+    except AIServiceError as e:
+        print("AI SERVICE ERROR:", repr(e))
+
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The AI service is currently unavailable. Please try again later."
+        )
+
+    except AIResponseError as e:
+        print("AI RESPONSE ERROR:", repr(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail="Received an invalid response while evaluating the answer."
+        )
+
+    feedback = Feedback(
+        answer_id=answer.id,
+        score=result["score"],
+        strengths=result["strengths"],
+        improvements=result["improvements"],
+        feedback_text=result["feedback_text"],
+        improved_answer=result["improved_answer"]
+    )
+
+    db.add(feedback)
+
+    try:
+        db.commit()
+        db.refresh(feedback)
+
+    # safety net for a race where two requests pass the existing_feedback check together
+    except IntegrityError:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This answer has already been evaluated"
+        )
+
+    except Exception as e:
+        db.rollback()
+
+        print("DATABASE ERROR:", repr(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to save the evaluation"
+        )
+
+    return feedback
+
+
+#retrieve the stored evaluation for a question, together with the question and answer
+@router.get(
+    "/{interview_id}/questions/{question_id}/feedback",
+    response_model=QuestionAnswerFeedbackResponse,
+    status_code=status.HTTP_200_OK
+)
+def get_answer_feedback(
+    interview_id: int,
+    question_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    interview = _get_owned_interview(interview_id, db, current_user)
+    question = _get_owned_question(interview, question_id, db)
+    answer = _get_owned_answer(question, db)
+
+    feedback = (
+        db.query(Feedback)
+        .filter(Feedback.answer_id == answer.id)
+        .first()
+    )
+
+    if feedback is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Feedback not found"
+        )
+
+    return QuestionAnswerFeedbackResponse(
+        question=question,
+        answer=answer,
+        evaluation=feedback
+    )
