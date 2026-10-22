@@ -1,3 +1,4 @@
+# Routes for managing interview sessions, questions, and answers.
 from fastapi import (
     APIRouter,
     Depends,
@@ -5,13 +6,20 @@ from fastapi import (
     status
 )
 
+# Standard library imports
+import logging
+from uuid import uuid4
+from datetime import datetime, timedelta, timezone
+from sqlalchemy import or_
 from pydantic import ValidationError
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
+#App imports
 from app.database import get_db
 from app.models.answer import Answer
 from app.models.cv import CVDocument
+from app.models.feedback import Feedback
 from app.models.interview_session import InterviewSession
 from app.models.interview_question import InterviewQuestion
 from app.models.user import User
@@ -21,19 +29,28 @@ from app.schemas.answer import (
     AnswerUpdate,
     InterviewAnswerResponse
 )
+from app.schemas.feedback import FeedbackResponse, QuestionAnswerFeedbackResponse
 from app.schemas.interview import (
     InterviewCreate,
     InterviewResponse,
-    InterviewDetailResponse
+    InterviewDetailResponse,
+    InterviewResultsResponse
 )
 from app.schemas.question import QuestionCreate, QuestionResponse
 from app.services.ai_service import (
     AIResponseError,
     AIServiceError,
+    evaluate_interview_answer as ai_evaluate_answer,
     generate_interview_questions as ai_generate_questions
 )
 
 from app.routes.dependencies import get_current_user
+from app.config import Evaluation_Reservation_Timeout_Seconds
+from app.schemas.feedback import AIEvaluationResult
+
+
+logger = logging.getLogger(__name__)
+
 
 #router for interview session endpoints
 router = APIRouter(
@@ -46,16 +63,19 @@ router = APIRouter(
 def _get_owned_interview(
     interview_id: int,
     db: Session,
-    current_user: User
+    current_user: User,
+    lock: bool = False
 ) -> InterviewSession:
-    interview = (
+    query = (
         db.query(InterviewSession)
         .filter(
             InterviewSession.id == interview_id,
             InterviewSession.user_id == current_user.id
         )
-        .first()
     )
+    if lock:
+        query = query.with_for_update().populate_existing()
+    interview = query.first()
 
     # 404 whether the interview doesn't exist or belongs to another user,
     # so we don't leak the existence of other users' interviews
@@ -66,6 +86,46 @@ def _get_owned_interview(
         )
 
     return interview
+
+
+def _valid_feedback(feedback: Feedback) -> bool:
+    try:
+        AIEvaluationResult(
+            score=feedback.score,
+            strengths=feedback.strengths,
+            improvements=feedback.improvements,
+            feedback=feedback.feedback_text,
+            improved_answer=feedback.improved_answer
+        )
+    except ValidationError:
+        return False
+    return True
+
+
+def _release_evaluation_reservation(
+    db: Session,
+    answer_id: int,
+    token: str
+) -> None:
+    try:
+        db.query(Answer).filter(
+            Answer.id == answer_id,
+            Answer.evaluation_token == token
+        ).update(
+            {
+                Answer.evaluation_token: None,
+                Answer.evaluation_started_at: None
+            },
+            synchronize_session=False
+        )
+        db.commit()
+    except SQLAlchemyError as error:
+        db.rollback()
+        logger.error(
+            "Failed to release evaluation reservation for answer %s: %s",
+            answer_id,
+            type(error).__name__
+        )
 
 
 #shared ownership check reused by the answer endpoints below
@@ -94,25 +154,24 @@ def _get_owned_question(
     return question
 
 
-#not exposed via an endpoint yet - available for future interview-completion logic
-def _get_answer_progress(interview: InterviewSession, db: Session) -> dict:
-    total_questions = (
-        db.query(InterviewQuestion)
-        .filter(InterviewQuestion.interview_id == interview.id)
-        .count()
-    )
-
-    answered_questions = (
+#shared ownership check reused by the evaluate/feedback endpoints below
+def _get_owned_answer(
+    question: InterviewQuestion,
+    db: Session
+) -> Answer:
+    answer = (
         db.query(Answer)
-        .filter(Answer.interview_id == interview.id)
-        .count()
+        .filter(Answer.question_id == question.id)
+        .first()
     )
 
-    return {
-        "total_questions": total_questions,
-        "answered_questions": answered_questions,
-        "remaining_questions": total_questions - answered_questions
-    }
+    if answer is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No answer has been submitted for this question yet"
+        )
+
+    return answer
 
 
 @router.post(
@@ -156,10 +215,10 @@ def create_interview(
         db.commit()
         db.refresh(new_interview)
 
-    except Exception as e:
+    except SQLAlchemyError as e:
         db.rollback()
 
-        print("DATABASE ERROR:", repr(e))
+        logger.error("Interview creation failed: %s", type(e).__name__)
 
         raise HTTPException(
             status_code=500,
@@ -200,6 +259,53 @@ def get_interview(
     current_user: User = Depends(get_current_user)
 ):
     return _get_owned_interview(interview_id, db, current_user)
+
+
+@router.get(
+    "/{interview_id}/results",
+    response_model=InterviewResultsResponse,
+    status_code=status.HTTP_200_OK
+)
+def get_interview_results(
+    interview_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    interview = _get_owned_interview(interview_id, db, current_user)
+    rows = (
+        db.query(InterviewQuestion, Answer, Feedback)
+        .outerjoin(Answer, Answer.question_id == InterviewQuestion.id)
+        .outerjoin(Feedback, Feedback.answer_id == Answer.id)
+        .filter(InterviewQuestion.interview_id == interview.id)
+        .all()
+    )
+    total_questions = len(rows)
+    submitted_answers = sum(answer is not None for _, answer, _ in rows)
+    valid_scores = [
+        feedback.score
+        for _, answer, feedback in rows
+        if answer is not None
+        and feedback is not None
+        and _valid_feedback(feedback)
+    ]
+    evaluated_answers = len(valid_scores)
+
+    return InterviewResultsResponse(
+        interview_id=interview.id,
+        status=interview.status,
+        total_questions=total_questions,
+        submitted_answers=submitted_answers,
+        evaluated_answers=evaluated_answers,
+        average_score=(
+            sum(valid_scores) / evaluated_answers if evaluated_answers else None
+        ),
+        remaining_questions=max(total_questions - submitted_answers, 0),
+        ready_for_completion=(
+            total_questions > 0
+            and submitted_answers == total_questions
+            and evaluated_answers == total_questions
+        )
+    )
 
 
 #uses the CV linked to the interview to generate AI-personalised questions
@@ -255,7 +361,7 @@ def generate_interview_questions(
         )
 
     except AIServiceError as e:
-        print("AI SERVICE ERROR:", repr(e))
+        logger.warning("Question generation provider failure: %s", type(e).__name__)
 
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -263,7 +369,7 @@ def generate_interview_questions(
         )
 
     except AIResponseError as e:
-        print("AI RESPONSE ERROR:", repr(e))
+        logger.warning("Question generation response failure: %s", type(e).__name__)
 
         raise HTTPException(
             status_code=500,
@@ -282,7 +388,7 @@ def generate_interview_questions(
             )
 
         except ValidationError as e:
-            print("AI RESPONSE ERROR:", repr(e))
+            logger.warning("Generated question validation failure: %s", type(e).__name__)
 
             raise HTTPException(
                 status_code=500,
@@ -307,10 +413,10 @@ def generate_interview_questions(
         for question in new_questions:
             db.refresh(question)
 
-    except Exception as e:
+    except SQLAlchemyError as e:
         db.rollback()
 
-        print("DATABASE ERROR:", repr(e))
+        logger.error("Question persistence failed: %s", type(e).__name__)
 
         raise HTTPException(
             status_code=500,
@@ -387,7 +493,12 @@ def create_answer(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    interview = _get_owned_interview(interview_id, db, current_user)
+    interview = _get_owned_interview(interview_id, db, current_user, lock=True)
+    if interview.status == "completed":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Completed interview answers cannot be modified"
+        )
     question = _get_owned_question(interview, question_id, db)
 
     existing_answer = (
@@ -423,10 +534,10 @@ def create_answer(
             detail="An answer has already been submitted for this question"
         )
 
-    except Exception as e:
+    except SQLAlchemyError as e:
         db.rollback()
 
-        print("DATABASE ERROR:", repr(e))
+        logger.error("Answer creation failed: %s", type(e).__name__)
 
         raise HTTPException(
             status_code=500,
@@ -449,12 +560,19 @@ def update_answer(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    interview = _get_owned_interview(interview_id, db, current_user)
+    interview = _get_owned_interview(interview_id, db, current_user, lock=True)
+    if interview.status == "completed":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Completed interview answers cannot be modified"
+        )
     question = _get_owned_question(interview, question_id, db)
 
     answer = (
         db.query(Answer)
         .filter(Answer.question_id == question.id)
+        .with_for_update()
+        .populate_existing()
         .first()
     )
 
@@ -465,15 +583,28 @@ def update_answer(
         )
 
     answer.answer_text = answer_in.answer_text
+    answer.answer_revision += 1
+    answer.evaluation_token = None
+    answer.evaluation_started_at = None
+
+    # stale feedback no longer matches the edited answer text - delete it in the same transaction
+    existing_feedback = (
+        db.query(Feedback)
+        .filter(Feedback.answer_id == answer.id)
+        .first()
+    )
+
+    if existing_feedback is not None:
+        db.delete(existing_feedback)
 
     try:
         db.commit()
         db.refresh(answer)
 
-    except Exception as e:
+    except SQLAlchemyError as e:
         db.rollback()
 
-        print("DATABASE ERROR:", repr(e))
+        logger.error("Answer update failed: %s", type(e).__name__)
 
         raise HTTPException(
             status_code=500,
@@ -551,3 +682,335 @@ def get_interview_answers(
         )
 
     return answers
+
+
+#requests an AI evaluation of the answer already submitted for this question
+@router.post(
+    "/{interview_id}/questions/{question_id}/evaluate",
+    response_model=FeedbackResponse,
+    status_code=status.HTTP_201_CREATED
+)
+def evaluate_answer(
+    interview_id: int,
+    question_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    interview = _get_owned_interview(interview_id, db, current_user, lock=True)
+    question = _get_owned_question(interview, question_id, db)
+    answer = (
+        db.query(Answer)
+        .filter(Answer.question_id == question.id)
+        .with_for_update()
+        .populate_existing()
+        .first()
+    )
+
+    if answer is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No answer has been submitted for this question yet"
+        )
+
+    existing_feedback = (
+        db.query(Feedback)
+        .filter(Feedback.answer_id == answer.id)
+        .first()
+    )
+
+    if existing_feedback is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This answer has already been evaluated"
+        )
+
+    now = datetime.now(timezone.utc)
+    stale_before = now - timedelta(
+        seconds=Evaluation_Reservation_Timeout_Seconds
+    )
+    started_at = answer.evaluation_started_at
+    if started_at is not None and started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+
+    if (
+        answer.evaluation_token is not None
+        and started_at is not None
+        and started_at > stale_before
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An evaluation for this answer is already in progress"
+        )
+
+    token = str(uuid4())
+    answer_id = answer.id
+    answer_revision = answer.answer_revision
+    answer_text = answer.answer_text
+    evaluation_context = {
+        "question_text": question.question_text,
+        "question_type": question.question_type,
+        "target_role": interview.target_role,
+        "difficulty": question.difficulty,
+        "job_description": interview.job_description,
+    }
+    cv = (
+        db.query(CVDocument)
+        .filter(CVDocument.id == interview.cv_id)
+        .first()
+    )
+    evaluation_context["cv_text"] = cv.extracted_text if cv is not None else None
+
+    reservation_result = (
+        db.query(Answer)
+        .filter(
+            Answer.id == answer.id,
+            Answer.answer_revision == answer_revision,
+            or_(
+                Answer.evaluation_token.is_(None),
+                Answer.evaluation_started_at.is_(None),
+                Answer.evaluation_started_at <= stale_before
+            )
+        )
+        .update(
+            {
+                Answer.evaluation_token: token,
+                Answer.evaluation_started_at: now
+            },
+            synchronize_session=False
+        )
+    )
+    if reservation_result != 1:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An evaluation for this answer is already in progress"
+        )
+
+    try:
+        db.commit()
+    except SQLAlchemyError as error:
+        db.rollback()
+        logger.error(
+            "Evaluation reservation failed for answer %s: %s",
+            answer_id,
+            type(error).__name__
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reserve the answer for evaluation"
+        ) from error
+
+    logger.info(
+        "Evaluation requested for answer %s (revision %s)",
+        answer_id,
+        answer_revision
+    )
+
+    try:
+        result = ai_evaluate_answer(
+            question_text=evaluation_context["question_text"],
+            answer_text=answer_text,
+            question_type=evaluation_context["question_type"],
+            target_role=evaluation_context["target_role"],
+            difficulty=evaluation_context["difficulty"],
+            job_description=evaluation_context["job_description"],
+            cv_text=evaluation_context["cv_text"]
+        )
+
+    except AIServiceError as e:
+        logger.warning(
+            "Evaluation provider failure for answer %s: %s",
+            answer_id,
+            type(e).__name__
+        )
+        _release_evaluation_reservation(db, answer_id, token)
+
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The AI service is currently unavailable. Please try again later."
+        )
+
+    except AIResponseError as e:
+        logger.warning(
+            "Evaluation response failure for answer %s: %s",
+            answer_id,
+            type(e).__name__
+        )
+        _release_evaluation_reservation(db, answer_id, token)
+
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Received an invalid response while evaluating the answer."
+        )
+
+    # Re-lock both rows after the provider call: updates invalidate the token and
+    # increment the revision before this result can be persisted.
+    locked_interview = _get_owned_interview(
+        interview_id, db, current_user, lock=True
+    )
+    if locked_interview.status == "completed":
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Completed interview answers cannot be evaluated"
+        )
+    current_answer = (
+        db.query(Answer)
+        .filter(Answer.id == answer_id)
+        .with_for_update()
+        .populate_existing()
+        .first()
+    )
+    if (
+        current_answer is None
+        or current_answer.evaluation_token != token
+        or current_answer.answer_revision != answer_revision
+    ):
+        db.rollback()
+        logger.info("Evaluation result became outdated for answer %s", answer_id)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The answer changed while it was being evaluated. Please retry."
+        )
+
+    feedback = Feedback(
+        answer_id=current_answer.id,
+        score=result["score"],
+        strengths=result["strengths"],
+        improvements=result["improvements"],
+        feedback_text=result["feedback_text"],
+        improved_answer=result["improved_answer"]
+    )
+
+    db.add(feedback)
+    current_answer.evaluation_token = None
+    current_answer.evaluation_started_at = None
+
+    try:
+        db.commit()
+        db.refresh(feedback)
+
+    # safety net for a race where two requests pass the existing_feedback check together
+    except IntegrityError:
+        db.rollback()
+        _release_evaluation_reservation(db, answer_id, token)
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This answer has already been evaluated"
+        )
+
+    except SQLAlchemyError as e:
+        db.rollback()
+        _release_evaluation_reservation(db, answer_id, token)
+
+        logger.error(
+            "Evaluation persistence failed for answer %s: %s",
+            answer_id,
+            type(e).__name__
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to save the evaluation"
+        )
+
+    logger.info("Evaluation completed for answer %s", answer_id)
+    return feedback
+
+
+#retrieve the stored evaluation for a question, together with the question and answer
+@router.get(
+    "/{interview_id}/questions/{question_id}/feedback",
+    response_model=QuestionAnswerFeedbackResponse,
+    status_code=status.HTTP_200_OK
+)
+def get_answer_feedback(
+    interview_id: int,
+    question_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    interview = _get_owned_interview(interview_id, db, current_user)
+    question = _get_owned_question(interview, question_id, db)
+    answer = _get_owned_answer(question, db)
+
+    feedback = (
+        db.query(Feedback)
+        .filter(Feedback.answer_id == answer.id)
+        .first()
+    )
+
+    if feedback is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Feedback not found"
+        )
+
+    return QuestionAnswerFeedbackResponse(
+        question=question,
+        answer=answer,
+        evaluation=feedback
+    )
+
+
+@router.post(
+    "/{interview_id}/complete",
+    response_model=InterviewResponse,
+    status_code=status.HTTP_200_OK
+)
+def complete_interview(
+    interview_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    interview = _get_owned_interview(
+        interview_id, db, current_user, lock=True
+    )
+    if interview.status == "completed":
+        return interview
+
+    rows = (
+        db.query(InterviewQuestion, Answer, Feedback)
+        .outerjoin(Answer, Answer.question_id == InterviewQuestion.id)
+        .outerjoin(Feedback, Feedback.answer_id == Answer.id)
+        .filter(InterviewQuestion.interview_id == interview.id)
+        .all()
+    )
+    is_complete = (
+        bool(rows)
+        and all(answer is not None for _, answer, _ in rows)
+        and all(
+            feedback is not None and _valid_feedback(feedback)
+            for _, _, feedback in rows
+        )
+    )
+    if not is_complete:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Interview completion requires generated questions, an answer "
+                "for every question, and valid feedback for every answer"
+            )
+        )
+
+    interview.status = "completed"
+    interview.completed_at = datetime.now(timezone.utc)
+    try:
+        db.commit()
+        db.refresh(interview)
+    except SQLAlchemyError as error:
+        db.rollback()
+        logger.error(
+            "Interview completion failed for interview %s: %s",
+            interview_id,
+            type(error).__name__
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to complete the interview"
+        ) from error
+
+    logger.info("Interview %s completed", interview_id)
+    return interview

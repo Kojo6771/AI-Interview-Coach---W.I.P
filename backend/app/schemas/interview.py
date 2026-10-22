@@ -1,5 +1,5 @@
 # Pydantic schemas for creating and returning interview sessions.
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -48,6 +48,26 @@ class InterviewResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    @field_validator("completed_at")
+    @classmethod
+    def normalize_completed_at(cls, value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
 
 class InterviewDetailResponse(InterviewResponse):
     pass
+
+
+class InterviewResultsResponse(BaseModel):
+    interview_id: int
+    status: str
+    total_questions: int
+    submitted_answers: int
+    evaluated_answers: int
+    average_score: Optional[float] = None
+    remaining_questions: int
+    ready_for_completion: bool

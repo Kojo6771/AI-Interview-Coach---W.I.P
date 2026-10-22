@@ -7,7 +7,8 @@ from sqlalchemy import (
     Integer,
     Text,
     DateTime,
-    ForeignKey
+    ForeignKey,
+    String
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -56,6 +57,23 @@ class Answer(Base):
         DateTime(timezone=True),
         server_default=func.now(),
         onupdate=func.now()
+    )
+
+    # Tracks the revision number of the answer, incremented with each update
+    answer_revision = Column(
+        Integer,
+        nullable=False,
+        default=1
+    )
+
+    evaluation_token = Column(
+        String(36),
+        nullable=True
+    )
+
+    evaluation_started_at = Column(
+        DateTime(timezone=True),
+        nullable=True
     )
 
     question = relationship("InterviewQuestion", back_populates="answer")

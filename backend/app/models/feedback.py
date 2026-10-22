@@ -1,14 +1,14 @@
-# Feedback records the automated evaluation for a single answer submission.
-# It stores the scored rubric dimensions and narrative coaching content.
+# Feedback records the AI evaluation of a single submitted answer.
+from datetime import datetime, timezone
+
 from sqlalchemy import (
     Column,
     Integer,
     Text,
-    Float,
+    JSON,
     ForeignKey,
     DateTime
 )
-from sqlalchemy.sql import func
 
 from app.database import Base
 
@@ -22,47 +22,50 @@ class Feedback(Base):
         primary_key=True
     )
 
+    # one active evaluation per answer
     answer_id = Column(
         Integer,
         ForeignKey("answers.id", ondelete="CASCADE"),
         unique=True,
+        nullable=False,
+        index=True
+    )
+
+    score = Column(
+        Integer,
         nullable=False
     )
 
-    overall_score = Column(
-        Float,
-        nullable=False
-    )
-
-    communication_score = Column(
-        Float
-    )
-
-    technical_score = Column(
-        Float
-    )
-
-    clarity_score = Column(
-        Float
-    )
-
-    confidence_score = Column(
-        Float
-    )
-
+    # list[str], not a delimited/plain string
     strengths = Column(
-        Text
+        JSON,
+        nullable=False
     )
 
-    weaknesses = Column(
-        Text
+    improvements = Column(
+        JSON,
+        nullable=False
     )
 
-    suggestions = Column(
-        Text
+    feedback_text = Column(
+        Text,
+        nullable=False
+    )
+
+    improved_answer = Column(
+        Text,
+        nullable=False
     )
 
     created_at = Column(
         DateTime(timezone=True),
-        server_default=func.now()
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False
+    )
+
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False
     )

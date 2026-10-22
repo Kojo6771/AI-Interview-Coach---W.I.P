@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 # Load environment variables from .env file
 from app.config import Database_URL
 
-engine = create_engine(Database_URL, echo=True)  # Set echo=True for SQL query logging
+engine = create_engine(Database_URL, echo=False)
 
 # Create a configured "Session" class
 SessionLocal = sessionmaker(

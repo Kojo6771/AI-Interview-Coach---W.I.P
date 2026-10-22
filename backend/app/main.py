@@ -1,23 +1,13 @@
+import logging
+
 from fastapi import FastAPI
 from app.routes import auth, users, cv, interviews
-from app.database import Base, engine
-from app.models import User
-from app.models import UserProfile
-from app.models import Interview
-from app.models import InterviewSession
-from app.models import Question
-from app.models import InterviewQuestion
-from app.models import Answer
-from app.models import Feedback
-from app.models import CVDocument
-from app.models import TargetRole
-from app.models import Progress
-from app.models import RefreshToken
 
 
-
-Base.metadata.create_all(bind=engine)  # Create database tables based on models
-
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
 
 # Create the FastAPI application instance.
 # This sets API metadata used by automatic docs and client generation.
