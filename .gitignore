@@ -1,3 +1,4 @@
 backend/.env
 backend/app/__pycache__/config.cpython-311.pyc
 backend/app/__pycache__/main.cpython-311.pyc
+*.pyc
