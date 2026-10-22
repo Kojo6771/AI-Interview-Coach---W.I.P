@@ -2,7 +2,7 @@ from dotenv import load_dotenv
 from pathlib import Path
 import os
 
-# Load environment variables from .env file
+# Load the backend's  local environment file.
 load_dotenv()
 
 # Get the database URL from environment variables, with a safe fallback for local development
