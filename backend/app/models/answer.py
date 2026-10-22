@@ -71,5 +71,10 @@ class Answer(Base):
         nullable=True
     )
 
+    evaluation_started_at = Column(
+        DateTime(timezone=True),
+        nullable=True
+    )
+
     question = relationship("InterviewQuestion", back_populates="answer")
     interview = relationship("InterviewSession", back_populates="answers")
